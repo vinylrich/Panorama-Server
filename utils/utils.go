@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 
 	"time"
 
@@ -24,6 +26,10 @@ type TokenDetails struct {
 	RefreshUuid  string
 	AtExpires    int64
 	RtExpires    int64
+}
+type AccessDetails struct {
+	AccessUuid string
+	UserId     uint64
 }
 
 var AccessToken = []byte(os.Getenv("ACCESS_SECRET"))
@@ -66,6 +72,7 @@ func CompareHash(hashpw, userpw string) bool {
 
 }
 
+//Create Token
 func GenerateToken(username string) (*TokenDetails, error) {
 	td := &TokenDetails{}
 
@@ -103,7 +110,8 @@ func GenerateToken(username string) (*TokenDetails, error) {
 	return td, nil
 }
 
-func CreateAuth(username string, td *TokenDetails, client *redis.Client) error {
+//saving session
+func CreateSession(username string, td *TokenDetails, client *redis.Client) error {
 	at := time.Unix(td.AtExpires, 0)
 	rt := time.Unix(td.RtExpires, 0)
 	now := time.Now()
@@ -142,27 +150,93 @@ func CreateAuth(username string, td *TokenDetails, client *redis.Client) error {
 // 	return true, nil
 // }
 
-func VerifyToken(req *http.Request, client *redis.Client) (string, error) {
+// func VerifyToken(req *http.Request, client *redis.Client) (string, error) {
+// 	sessionKey, err := req.Cookie("session_id")
+// 	if err != nil {
+// 		if err == http.ErrNoCookie {
+// 			return "", err
+// 		}
+// 		// For any other type of error, return a bad request status
+// 		return "", err
+// 	}
+// 	response, err := client.Get(sessionKey.Value).Result()
+// 	if response == "" {
+// 		// If the session token is not present in cache, return an unauthorized error
+// 		err := errors.New("session token is not present in cache")
+// 		return "", err
+// 	}
+// 	if err != nil {
+// 		return "", err
+// 	}
 
-	sessionKey, err := req.Cookie("session_id")
-	if err != nil {
-		if err == http.ErrNoCookie {
-			return "", err
+// 	return response, nil
+// }
+
+//Verify Token
+func VerifyToken(req *http.Request) (*jwt.Token, error) {
+	tokenString := ExtractToken(req)
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		// For any other type of error, return a bad request status
-		return "", err
+		return []byte(os.Getenv("ACCESS_SECRET")), nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	response, err := client.Get(sessionKey.Value).Result()
-	if response == "" {
-		// If the session token is not present in cache, return an unauthorized error
-		err := errors.New("session token is not present in cache")
-		return "", err
+	return token, nil
+}
+
+//Get Token
+func ExtractToken(req *http.Request) string {
+	bearToken := req.Header.Get("Authorization")
+	strArr := strings.Split(bearToken, " ")
+	if len(strArr) == 2 {
+		return strArr[1]
 	}
+	return ""
+}
+
+func TokenValid(req *http.Request) error {
+	token, err := VerifyToken(req)
+	if err != nil {
+		return err
+	}
+	if _, ok := token.Claims.(jwt.Claims); !ok && !token.Valid {
+		errors.New("Token is Unavailable")
+		return err
+	}
+	return nil
+}
+func ExtractTokenMetadata(req *http.Request) (*AccessDetails, error) {
+	token, err := VerifyToken(req)
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if ok && token.Valid {
+		accessUuid, ok := claims["access_uuid"].(string)
+		if !ok {
+			return nil, err
+		}
+		userId, err := strconv.ParseUint(fmt.Sprintf("%.f", claims["user_id"]), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		return &AccessDetails{
+			AccessUuid: accessUuid,
+			UserId:     userId,
+		}, nil
+	}
+	return nil, err
+}
+
+func GetAuth(authD *AccessDetails, client *redis.Client) (string, error) {
+	username, err := client.Get(authD.AccessUuid).Result()
 	if err != nil {
 		return "", err
 	}
-
-	return response, nil
+	return username, nil
 }
 
 func UploadFile(c *gin.Context, response string) error {
